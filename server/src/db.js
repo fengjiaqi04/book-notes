@@ -1,16 +1,15 @@
-import Database from "better-sqlite3";
+import "dotenv/config";
+import { Pool } from "pg";
 
-const db = new Database("notes.db");
+if (!process.env.DATABASE_URL) {
+  throw new Error("Missing DATABASE_URL in server/.env");
+}
 
-// Create table if not exists
-db.exec(`
-  CREATE TABLE IF NOT EXISTS notes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bookTitle TEXT NOT NULL,
-    author TEXT NOT NULL,
-    note TEXT NOT NULL,
-    createdAt TEXT NOT NULL
-  );
-`);
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
 
-export default db;
+export async function dbHealthcheck() {
+  const res = await pool.query("SELECT 1 as ok;");
+  return res.rows?.[0]?.ok === 1;
+}

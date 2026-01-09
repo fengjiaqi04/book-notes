@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { createNote, deleteNote, getNote, listNotes } from "./api";
+import {
+  createNote,
+  deleteNote,
+  getNote,
+  listNotes,
+  login,
+  register,
+  me,
+  getToken,
+  setToken,
+  aiEnhanceNote,
+} from "./api";
 
 function fmt(iso) {
   try {
@@ -9,7 +20,31 @@ function fmt(iso) {
   }
 }
 
+// --- Collapsible text helpers (used for BOTH original + AI text) ---
+function splitLines(text) {
+  return String(text || "").replace(/\r\n/g, "\n").split("\n");
+}
+
+function isTooLong(text, maxLines = 6) {
+  return splitLines(text).length > maxLines;
+}
+
+function getCollapsedText(text, maxLines = 6) {
+  const lines = splitLines(text);
+  if (lines.length <= maxLines) return text;
+  return lines.slice(0, maxLines).join("\n") + "\n…";
+}
+
 export default function App() {
+  // -------- Auth state --------
+  const [token, setTokenState] = useState(getToken());
+  const [user, setUser] = useState(null);
+  const [authMode, setAuthMode] = useState("login"); // "login" | "register"
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authStatus, setAuthStatus] = useState("");
+
+  // -------- Notes state --------
   const [notes, setNotes] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [selected, setSelected] = useState(null);
@@ -19,50 +54,183 @@ export default function App() {
   const [note, setNote] = useState("");
   const [status, setStatus] = useState("");
 
-  const canSubmit = useMemo(
-    () => bookTitle.trim() && author.trim() && note.trim(),
-    [bookTitle, author, note]
+  // -------- AI enhance/summarize --------
+  const [aiNote, setAiNote] = useState("");
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [saveChoice, setSaveChoice] = useState("original"); // "original" | "ai"
+
+  // -------- Collapse/Expand state (NEW) --------
+  const [aiExpanded, setAiExpanded] = useState(false);
+  const [originalExpanded, setOriginalExpanded] = useState(false);
+
+  const canAuthSubmit = useMemo(
+    () =>
+      authEmail.trim() &&
+      authPassword.trim().length >= (authMode === "register" ? 6 : 1),
+    [authEmail, authPassword, authMode]
   );
 
-  async function refresh() {
+  const canSaveChosen = useMemo(() => {
+    const baseOk = bookTitle.trim() && author.trim();
+    if (!baseOk) return false;
+    if (saveChoice === "ai") return aiNote.trim().length > 0;
+    return note.trim().length > 0;
+  }, [bookTitle, author, note, aiNote, saveChoice]);
+
+  // --- load user if token exists ---
+  useEffect(() => {
+    if (!token) {
+      setUser(null);
+      return;
+    }
+    me()
+      .then((data) => setUser(data.user))
+      .catch((e) => {
+        // token invalid/expired
+        setToken("");
+        setTokenState("");
+        setUser(null);
+        setAuthStatus(String(e.message || e));
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  async function refreshNotes() {
     const data = await listNotes();
     setNotes(data);
   }
 
+  // Load notes only after login
   useEffect(() => {
-    refresh().catch((e) => setStatus(String(e.message || e)));
-  }, []);
+    if (!user) return;
+    refreshNotes().catch((e) => setStatus(String(e.message || e)));
+  }, [user]);
 
   useEffect(() => {
+    if (!user) return;
     if (selectedId == null) {
       setSelected(null);
       return;
     }
     getNote(selectedId)
-      .then(setSelected)
+      .then((data) => {
+        setSelected(data);
+        // When switching notes, collapse preview by default
+        setOriginalExpanded(false);
+      })
       .catch((e) => setStatus(String(e.message || e)));
-  }, [selectedId]);
-
-  async function onCreate(e) {
-    e.preventDefault();
-    setStatus("");
-    try {
-      await createNote({ bookTitle, author, note });
-      setBookTitle("");
-      setAuthor("");
-      setNote("");
-      await refresh();
-    } catch (e) {
-      setStatus(String(e.message || e));
-    }
-  }
+  }, [selectedId, user]);
 
   async function onDelete(id) {
     setStatus("");
     try {
       await deleteNote(id);
       if (selectedId === id) setSelectedId(null);
-      await refresh();
+      await refreshNotes();
+    } catch (e) {
+      setStatus(String(e.message || e));
+    }
+  }
+
+  async function onAuthSubmit(e) {
+    e.preventDefault();
+    setAuthStatus("");
+
+    try {
+      const fn = authMode === "login" ? login : register;
+      const data = await fn({ email: authEmail, password: authPassword });
+
+      setToken(data.token);
+      setTokenState(data.token);
+      setUser(data.user);
+
+      // reset auth form
+      setAuthEmail("");
+      setAuthPassword("");
+    } catch (e) {
+      setAuthStatus(String(e.message || e));
+    }
+  }
+
+  function onLogout() {
+    setToken("");
+    setTokenState("");
+    setUser(null);
+
+    // clear app state
+    setNotes([]);
+    setSelectedId(null);
+    setSelected(null);
+    setBookTitle("");
+    setAuthor("");
+    setNote("");
+    setStatus("");
+    setAuthStatus("");
+
+    // clear AI state
+    setAiNote("");
+    setAiError("");
+    setAiLoading(false);
+    setSaveChoice("original");
+
+    // clear collapse state
+    setAiExpanded(false);
+    setOriginalExpanded(false);
+  }
+
+  async function onAiGenerate() {
+    setAiError("");
+    setStatus("");
+
+    if (!note.trim()) {
+      setAiError("Write something in the note box first.");
+      return;
+    }
+
+    setAiLoading(true);
+    try {
+      const out = await aiEnhanceNote(note);
+      setAiNote(out);
+      setSaveChoice("ai"); // default to AI after generation
+      setAiExpanded(false); // collapse by default
+    } catch (e) {
+      setAiError(String(e.message || e));
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  async function onSaveChosen(e) {
+    e.preventDefault();
+    setStatus("");
+    setAiError("");
+
+    const finalNote = saveChoice === "ai" ? aiNote : note;
+
+    if (!bookTitle.trim() || !author.trim() || !finalNote.trim()) {
+      setStatus("Please fill Book title, Author, and the chosen note content.");
+      return;
+    }
+
+    try {
+      await createNote({ bookTitle, author, note: finalNote });
+
+      // reset form
+      setBookTitle("");
+      setAuthor("");
+      setNote("");
+      setStatus("");
+
+      // reset AI + collapse
+      setAiNote("");
+      setAiError("");
+      setAiLoading(false);
+      setSaveChoice("original");
+      setAiExpanded(false);
+      setOriginalExpanded(false);
+
+      await refreshNotes();
     } catch (e) {
       setStatus(String(e.message || e));
     }
@@ -78,7 +246,6 @@ export default function App() {
         'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"',
     },
 
-    // ✅ truly full width
     container: {
       width: "100%",
       maxWidth: "none",
@@ -96,7 +263,6 @@ export default function App() {
     title: { margin: 0, fontSize: 34, letterSpacing: -0.5 },
     subtitle: { margin: 0, opacity: 0.7, fontSize: 14 },
 
-    // ✅ fills screen, gives right column much more space
     grid: {
       display: "grid",
       gridTemplateColumns: "minmax(340px, 520px) minmax(700px, 1fr)",
@@ -111,7 +277,7 @@ export default function App() {
       boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
       border: "1px solid rgba(0,0,0,0.06)",
       padding: 16,
-      width: "100%", // ✅ allow cards to expand fully
+      width: "100%",
     },
 
     cardTitle: { margin: "0 0 12px 0", fontSize: 16 },
@@ -134,7 +300,7 @@ export default function App() {
       outline: "none",
       fontSize: 14,
       background: "white",
-      minHeight: 360, // ✅ bigger so right side feels full
+      minHeight: 360,
       resize: "vertical",
       fontFamily: "inherit",
     },
@@ -150,6 +316,16 @@ export default function App() {
       fontSize: 14,
       width: "100%",
     }),
+
+    smallBtn: {
+      padding: "8px 10px",
+      borderRadius: 10,
+      border: "1px solid rgba(0,0,0,0.12)",
+      background: "white",
+      cursor: "pointer",
+      fontWeight: 700,
+      fontSize: 13,
+    },
 
     listItem: (active) => ({
       display: "flex",
@@ -199,8 +375,104 @@ export default function App() {
       gap: 12,
       marginBottom: 12,
     },
+
+    aiPanel: {
+      borderRadius: 12,
+      border: "1px solid rgba(0,0,0,0.10)",
+      background: "rgba(17,24,39,0.02)",
+      padding: 12,
+    },
+
+    radioRow: {
+      display: "flex",
+      gap: 16,
+      alignItems: "center",
+      padding: "10px 12px",
+      borderRadius: 10,
+      border: "1px solid rgba(0,0,0,0.12)",
+      background: "rgba(17,24,39,0.02)",
+      marginTop: 10,
+    },
+
+    toggleBtn: {
+      marginTop: 8,
+      background: "transparent",
+      border: "none",
+      padding: 0,
+      color: "#2563eb",
+      fontWeight: 700,
+      cursor: "pointer",
+    },
   };
 
+  // ---------- AUTH SCREEN ----------
+  if (!user) {
+    return (
+      <div style={styles.page}>
+        <div style={{ ...styles.container, maxWidth: 520 }}>
+          <div style={styles.header}>
+            <div>
+              <h1 style={styles.title}>📚 Book Notes</h1>
+              <p style={styles.subtitle}>Log in to access your personal notes.</p>
+            </div>
+          </div>
+
+          <div style={styles.card}>
+            <h2 style={styles.cardTitle}>
+              {authMode === "login" ? "Log in" : "Create an account"}
+            </h2>
+
+            <form onSubmit={onAuthSubmit} style={{ display: "grid", gap: 12 }}>
+              <input
+                style={styles.input}
+                placeholder="Email"
+                value={authEmail}
+                onChange={(e) => setAuthEmail(e.target.value)}
+              />
+              <input
+                style={styles.input}
+                type="password"
+                placeholder="Password"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+              />
+
+              <button
+                type="submit"
+                style={styles.button(!canAuthSubmit)}
+                disabled={!canAuthSubmit}
+              >
+                {authMode === "login" ? "Log in" : "Register"}
+              </button>
+
+              <button
+                type="button"
+                style={styles.smallBtn}
+                onClick={() =>
+                  setAuthMode((m) => (m === "login" ? "register" : "login"))
+                }
+              >
+                {authMode === "login"
+                  ? "New here? Register instead"
+                  : "Already have an account? Log in"}
+              </button>
+            </form>
+
+            {authStatus ? <div style={styles.status}>{authStatus}</div> : null}
+
+            <div style={{ marginTop: 10, opacity: 0.7, fontSize: 12 }}>
+              Password rule:{" "}
+              {authMode === "register"
+                ? "min 6 characters"
+                : "enter your password"}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- APP SCREEN ----------
   return (
     <div style={styles.page}>
       <div style={styles.container}>
@@ -211,8 +483,12 @@ export default function App() {
               Quickly save notes per book. Click a note to preview.
             </p>
           </div>
-          <div style={{ opacity: 0.6, fontSize: 13 }}>
-            Backend: <code>localhost:4000</code>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ opacity: 0.7, fontSize: 13 }}>{user.email}</div>
+            <button style={styles.smallBtn} onClick={onLogout}>
+              Log out
+            </button>
           </div>
         </div>
 
@@ -280,7 +556,7 @@ export default function App() {
             <div style={styles.card}>
               <h2 style={styles.cardTitle}>Create a note</h2>
 
-              <form onSubmit={onCreate} style={{ display: "grid", gap: 12 }}>
+              <form onSubmit={onSaveChosen} style={{ display: "grid", gap: 12 }}>
                 <div style={styles.topRow}>
                   <input
                     style={styles.input}
@@ -300,22 +576,93 @@ export default function App() {
                   style={styles.textarea}
                   placeholder="Your note (quotes, reflections, key ideas...)"
                   value={note}
-                  onChange={(e) => setNote(e.target.value)}
+                  onChange={(e) => {
+                    setNote(e.target.value);
+                    setOriginalExpanded(false); // collapse original when editing
+                  }}
                 />
 
                 <button
-                  type="submit"
-                  style={styles.button(!canSubmit)}
-                  disabled={!canSubmit}
+                  type="button"
+                  style={styles.button(aiLoading || !note.trim())}
+                  disabled={aiLoading || !note.trim()}
+                  onClick={onAiGenerate}
                 >
-                  Save note
+                  {aiLoading ? "Generating..." : "AI Enhance / Summarize"}
+                </button>
+
+                {aiError ? <div style={styles.status}>{aiError}</div> : null}
+
+                {aiNote ? (
+                  <div style={styles.aiPanel}>
+                    <div style={{ fontWeight: 800, marginBottom: 8 }}>
+                      AI note (preview)
+                    </div>
+
+                    <p style={styles.previewBody}>
+                      {aiExpanded ? aiNote : getCollapsedText(aiNote, 6)}
+                    </p>
+
+                    {isTooLong(aiNote, 6) && (
+                      <button
+                        type="button"
+                        style={styles.toggleBtn}
+                        onClick={() => setAiExpanded((v) => !v)}
+                      >
+                        {aiExpanded ? "Show less" : "Show more"}
+                      </button>
+                    )}
+
+                    <div style={styles.radioRow}>
+                      <strong>Save:</strong>
+
+                      <label
+                        style={{
+                          display: "flex",
+                          gap: 6,
+                          alignItems: "center",
+                        }}
+                      >
+                        <input
+                          type="radio"
+                          name="saveChoice"
+                          checked={saveChoice === "original"}
+                          onChange={() => setSaveChoice("original")}
+                        />
+                        Original note
+                      </label>
+
+                      <label
+                        style={{
+                          display: "flex",
+                          gap: 6,
+                          alignItems: "center",
+                        }}
+                      >
+                        <input
+                          type="radio"
+                          name="saveChoice"
+                          checked={saveChoice === "ai"}
+                          onChange={() => setSaveChoice("ai")}
+                        />
+                        AI note
+                      </label>
+                    </div>
+                  </div>
+                ) : null}
+
+                <button
+                  type="submit"
+                  style={styles.button(!canSaveChosen)}
+                  disabled={!canSaveChosen}
+                >
+                  Save {saveChoice === "ai" ? "AI note" : "original note"}
                 </button>
               </form>
 
               {status ? <div style={styles.status}>{status}</div> : null}
             </div>
 
-            {/* ✅ make preview sticky so right side feels full while scrolling */}
             <div style={{ position: "sticky", top: 16 }}>
               <div style={styles.card}>
                 <h2 style={styles.cardTitle}>Preview</h2>
@@ -326,7 +673,22 @@ export default function App() {
                     <div style={styles.previewMeta}>
                       {selected.author} • {fmt(selected.createdAt)}
                     </div>
-                    <p style={styles.previewBody}>{selected.note}</p>
+
+                    <p style={styles.previewBody}>
+                      {originalExpanded
+                        ? selected.note
+                        : getCollapsedText(selected.note, 10)}
+                    </p>
+
+                    {isTooLong(selected.note, 10) && (
+                      <button
+                        type="button"
+                        style={styles.toggleBtn}
+                        onClick={() => setOriginalExpanded((v) => !v)}
+                      >
+                        {originalExpanded ? "Show less" : "Show more"}
+                      </button>
+                    )}
                   </>
                 ) : (
                   <div style={styles.empty}>
@@ -338,7 +700,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* extra bottom padding so it doesn’t feel cut off */}
         <div style={{ height: 24 }} />
       </div>
     </div>
