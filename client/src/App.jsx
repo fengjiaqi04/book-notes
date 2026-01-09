@@ -21,18 +21,33 @@ function fmt(iso) {
 }
 
 // --- Collapsible text helpers (used for BOTH original + AI text) ---
+// Handles BOTH multi-line notes and long single-line notes (e.g. "dddddddd....")
+function normalizeText(text) {
+  return String(text || "").replace(/\r\n/g, "\n");
+}
+
 function splitLines(text) {
-  return String(text || "").replace(/\r\n/g, "\n").split("\n");
+  return normalizeText(text).split("\n");
 }
 
-function isTooLong(text, maxLines = 6) {
-  return splitLines(text).length > maxLines;
+// Consider either "too many lines" OR "too many characters"
+function isTooLong(text, maxLines = 6, maxChars = 800) {
+  const t = normalizeText(text);
+  return splitLines(t).length > maxLines || t.length > maxChars;
 }
 
-function getCollapsedText(text, maxLines = 6) {
-  const lines = splitLines(text);
-  if (lines.length <= maxLines) return text;
-  return lines.slice(0, maxLines).join("\n") + "\n…";
+// Collapse by lines if multi-line; otherwise collapse by characters
+function getCollapsedText(text, maxLines = 6, maxChars = 800) {
+  const t = normalizeText(text);
+  const lines = splitLines(t);
+
+  if (lines.length > maxLines) {
+    return lines.slice(0, maxLines).join("\n") + "\n…";
+  }
+  if (t.length > maxChars) {
+    return t.slice(0, maxChars) + "…";
+  }
+  return t;
 }
 
 export default function App() {
@@ -60,7 +75,7 @@ export default function App() {
   const [aiError, setAiError] = useState("");
   const [saveChoice, setSaveChoice] = useState("original"); // "original" | "ai"
 
-  // -------- Collapse/Expand state (NEW) --------
+  // -------- Collapse/Expand state --------
   const [aiExpanded, setAiExpanded] = useState(false);
   const [originalExpanded, setOriginalExpanded] = useState(false);
 
@@ -367,6 +382,10 @@ export default function App() {
       whiteSpace: "pre-wrap",
       lineHeight: 1.65,
       fontSize: 14,
+
+      // NEW: prevent long unbroken strings from breaking layout
+      overflowWrap: "anywhere",
+      wordBreak: "break-word",
     },
 
     topRow: {
@@ -578,7 +597,7 @@ export default function App() {
                   value={note}
                   onChange={(e) => {
                     setNote(e.target.value);
-                    setOriginalExpanded(false); // collapse original when editing
+                    setOriginalExpanded(false);
                   }}
                 />
 
@@ -600,10 +619,10 @@ export default function App() {
                     </div>
 
                     <p style={styles.previewBody}>
-                      {aiExpanded ? aiNote : getCollapsedText(aiNote, 6)}
+                      {aiExpanded ? aiNote : getCollapsedText(aiNote, 6, 800)}
                     </p>
 
-                    {isTooLong(aiNote, 6) && (
+                    {isTooLong(aiNote, 6, 800) && (
                       <button
                         type="button"
                         style={styles.toggleBtn}
@@ -616,13 +635,7 @@ export default function App() {
                     <div style={styles.radioRow}>
                       <strong>Save:</strong>
 
-                      <label
-                        style={{
-                          display: "flex",
-                          gap: 6,
-                          alignItems: "center",
-                        }}
-                      >
+                      <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                         <input
                           type="radio"
                           name="saveChoice"
@@ -632,13 +645,7 @@ export default function App() {
                         Original note
                       </label>
 
-                      <label
-                        style={{
-                          display: "flex",
-                          gap: 6,
-                          alignItems: "center",
-                        }}
-                      >
+                      <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
                         <input
                           type="radio"
                           name="saveChoice"
@@ -677,10 +684,10 @@ export default function App() {
                     <p style={styles.previewBody}>
                       {originalExpanded
                         ? selected.note
-                        : getCollapsedText(selected.note, 10)}
+                        : getCollapsedText(selected.note, 10, 1200)}
                     </p>
 
-                    {isTooLong(selected.note, 10) && (
+                    {isTooLong(selected.note, 10, 1200) && (
                       <button
                         type="button"
                         style={styles.toggleBtn}
